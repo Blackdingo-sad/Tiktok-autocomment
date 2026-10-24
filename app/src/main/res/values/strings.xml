@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">TikTok Live Auto Commenter</string>
+    <string name="accessibility_service_description">Dịch vụ tự động nhập số và bình luận vào TikTok Live khi nhận diện giọng nói.</string>
+</resources>
