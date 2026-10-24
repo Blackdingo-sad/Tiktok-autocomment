@@ -22,7 +22,6 @@ import android.widget.ImageView
 import android.widget.TextView
 import androidx.core.app.NotificationCompat
 import com.example.app.R
-import com.example.app.MainActivity
 import com.example.app.speech.SpeechRecognitionManager
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -191,18 +190,20 @@ class FloatingOverlayService : Service() {
     }
 
     private fun toggleRunningState() {
-        if (speechManager.isListening.value) {
-            speechManager.stopListening()
-            isRunning = false
-            bubbleCard.background = createCircleDrawable(Color.parseColor("#1976D2"))
-            iconView.setImageResource(android.R.drawable.ic_media_play)
+        isRunning = !isRunning
+        if (isRunning) {
+            speechManager.startListening()
+            bubbleCard.background = createCircleDrawable(Color.parseColor("#388E3C")) // Green active
+            iconView.setImageResource(android.R.drawable.ic_media_pause)
+            statusText.visibility = View.GONE
+            iconView.visibility = View.VISIBLE
         } else {
-            isRunning = false
-            speechManager.reportStatus("Hãy mở app và bấm Bắt đầu nghe audio TikTok Live để cấp quyền Android")
-            startActivity(Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+            speechManager.stopListening()
+            bubbleCard.background = createCircleDrawable(Color.parseColor("#1976D2")) // Blue idle
+            iconView.setImageResource(android.R.drawable.ic_media_play)
+            statusText.visibility = View.GONE
+            iconView.visibility = View.VISIBLE
         }
-        statusText.visibility = View.GONE
-        iconView.visibility = View.VISIBLE
     }
 
     private fun resetIdleTimer() {

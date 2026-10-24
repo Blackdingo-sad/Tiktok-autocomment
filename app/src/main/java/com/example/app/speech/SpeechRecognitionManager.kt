@@ -2,12 +2,23 @@ package com.example.app.speech
 
 import android.content.Context
 import android.content.Intent
+import android.os.Bundle
+import android.speech.RecognitionListener
+import android.speech.RecognizerIntent
+import android.speech.SpeechRecognizer
+import android.util.Log
+import com.example.app.parsing.VietnameseNumberParser
+import com.example.app.service.TikTokAutoCommentService
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
-internal object TikTokAudioStatus {
-    private val _speechState = MutableStateFlow("Chưa bật nghe audio TikTok Live")
+class SpeechRecognitionManager(private val context: Context) {
+
+    private var speechRecognizer: SpeechRecognizer? = null
+    private var isListening = false
+
+    private val _speechState = MutableStateFlow("Chưa bật nhận diện giọng nói")
     val speechState: StateFlow<String> = _speechState.asStateFlow()
 
     private val _lastRecognizedText = MutableStateFlow("")
@@ -16,74 +27,105 @@ internal object TikTokAudioStatus {
     private val _lastDetectedNumber = MutableStateFlow<Long?>(null)
     val lastDetectedNumber: StateFlow<Long?> = _lastDetectedNumber.asStateFlow()
 
-    private val _isListening = MutableStateFlow(false)
-    val isListening: StateFlow<Boolean> = _isListening.asStateFlow()
-
-    private val _isPreparing = MutableStateFlow(false)
-    val isPreparing: StateFlow<Boolean> = _isPreparing.asStateFlow()
-
-    fun state(value: String) { _speechState.value = value }
-    fun transcript(value: String) { _lastRecognizedText.value = value }
-    fun number(value: Long?) { _lastDetectedNumber.value = value }
-    fun listening(value: Boolean) { _isListening.value = value }
-    fun preparing(value: Boolean) { _isPreparing.value = value }
-}
-
-class SpeechRecognitionManager(private val context: Context) {
-
-    val speechState = TikTokAudioStatus.speechState
-    val lastRecognizedText = TikTokAudioStatus.lastRecognizedText
-    val lastDetectedNumber = TikTokAudioStatus.lastDetectedNumber
-    val isListening = TikTokAudioStatus.isListening
-    val isPreparing = TikTokAudioStatus.isPreparing
-
     var autoCommentEnabled: Boolean = true
     var prefixAt: Boolean = true
 
-    suspend fun prepareModel() {
-        TikTokAudioStatus.preparing(true)
-        TikTokAudioStatus.state("Đang chuẩn bị model tiếng Việt lần đầu...")
-        try {
-            VietnameseVoskModel.ensureInstalled(context) { percent ->
-                TikTokAudioStatus.state("Đang tải model ASR tiếng Việt: $percent%")
+    fun startListening() {
+        if (isListening) return
+        if (!SpeechRecognizer.isRecognitionAvailable(context)) {
+            _speechState.value = "Thiết bị không hỗ trợ nhận diện giọng nói SpeechRecognizer"
+            return
+        }
+
+        if (speechRecognizer == null) {
+            speechRecognizer = SpeechRecognizer.createSpeechRecognizer(context).apply {
+                setRecognitionListener(createListener())
             }
-            TikTokAudioStatus.state("Model ASR tiếng Việt đã sẵn sàng")
-        } catch (error: Exception) {
-            TikTokAudioStatus.state("Không tải được model ASR: ${error.message ?: "lỗi mạng"}")
-            throw error
-        } finally {
-            TikTokAudioStatus.preparing(false)
         }
-    }
 
-    fun startListening(resultCode: Int, projectionData: Intent) {
-        val serviceIntent = Intent(context, com.example.app.service.TikTokPlaybackCaptureService::class.java).apply {
-            action = com.example.app.service.TikTokPlaybackCaptureService.ACTION_START
-            putExtra(com.example.app.service.TikTokPlaybackCaptureService.EXTRA_RESULT_CODE, resultCode)
-            putExtra(com.example.app.service.TikTokPlaybackCaptureService.EXTRA_RESULT_DATA, projectionData)
-            putExtra(com.example.app.service.TikTokPlaybackCaptureService.EXTRA_AUTO_COMMENT, autoCommentEnabled)
-            putExtra(com.example.app.service.TikTokPlaybackCaptureService.EXTRA_PREFIX_AT, prefixAt)
+        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE, "vi-VN")
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, "vi-VN")
+            putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
         }
-        androidx.core.content.ContextCompat.startForegroundService(context, serviceIntent)
-    }
 
-    fun updateSettings() {
-        if (!isListening.value) return
-        val serviceIntent = Intent(context, com.example.app.service.TikTokPlaybackCaptureService::class.java).apply {
-            action = com.example.app.service.TikTokPlaybackCaptureService.ACTION_UPDATE_SETTINGS
-            putExtra(com.example.app.service.TikTokPlaybackCaptureService.EXTRA_AUTO_COMMENT, autoCommentEnabled)
-            putExtra(com.example.app.service.TikTokPlaybackCaptureService.EXTRA_PREFIX_AT, prefixAt)
+        try {
+            speechRecognizer?.startListening(intent)
+            isListening = true
+            _speechState.value = "Đang lắng nghe tiếng Việt..."
+        } catch (e: Exception) {
+            Log.e(TAG, "Error starting speech recognizer", e)
+            _speechState.value = "Lỗi khi khởi động nhận diện: ${e.message}"
         }
-        context.startService(serviceIntent)
     }
 
     fun stopListening() {
-        context.startService(
-            Intent(context, com.example.app.service.TikTokPlaybackCaptureService::class.java).apply {
-                action = com.example.app.service.TikTokPlaybackCaptureService.ACTION_STOP
-            }
-        )
+        isListening = false
+        speechRecognizer?.stopListening()
+        speechRecognizer?.destroy()
+        speechRecognizer = null
+        _speechState.value = "Đã dừng lắng nghe."
     }
 
-    fun reportStatus(message: String) = TikTokAudioStatus.state(message)
+    private fun createListener() = object : RecognitionListener {
+        override fun onReadyForSpeech(params: Bundle?) {
+            _speechState.value = "Sẵn sàng nhận diện giọng nói..."
+        }
+
+        override fun onBeginningOfSpeech() {
+            _speechState.value = "Đang thu âm giọng nói..."
+        }
+
+        override fun onRmsChanged(rmsdB: Float) {}
+
+        override fun onBufferReceived(buffer: ByteArray?) {}
+
+        override fun onEndOfSpeech() {
+            _speechState.value = "Đang xử lý âm thanh..."
+        }
+
+        override fun onError(error: Int) {
+            Log.w(TAG, "SpeechRecognizer error code: $error")
+            isListening = false
+            if (error != SpeechRecognizer.ERROR_CLIENT) {
+                _speechState.value = "Đang kết nối lại microphone..."
+                startListening()
+            }
+        }
+
+        override fun onResults(results: Bundle?) {
+            processBundleResults(results, isFinal = true)
+            isListening = false
+            startListening()
+        }
+
+        override fun onPartialResults(partialResults: Bundle?) {
+            processBundleResults(partialResults, isFinal = false)
+        }
+
+        override fun onEvent(eventType: Int, params: Bundle?) {}
+    }
+
+    private fun processBundleResults(bundle: Bundle?, isFinal: Boolean) {
+        val matches = bundle?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION) ?: return
+        if (matches.isEmpty()) return
+
+        val text = matches[0]
+        _lastRecognizedText.value = text
+
+        val numbers = VietnameseNumberParser.parseAll(text)
+        if (numbers.isNotEmpty()) {
+            val lastNum = numbers.last().value
+            _lastDetectedNumber.value = lastNum
+
+            if (isFinal && autoCommentEnabled) {
+                TikTokAutoCommentService.autoComment(lastNum.toString(), prefixAt)
+            }
+        }
+    }
+
+    companion object {
+        private const val TAG = "SpeechManager"
+    }
 }
