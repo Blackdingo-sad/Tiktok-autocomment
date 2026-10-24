@@ -4,6 +4,8 @@ import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
+import android.media.projection.MediaProjectionManager
+import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
 import android.widget.Toast
@@ -11,6 +13,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.lifecycle.lifecycleScope
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -54,6 +57,7 @@ import com.example.app.service.FloatingWidgetService
 import com.example.app.service.TikTokAutoCommentService
 import com.example.app.speech.SpeechRecognitionManager
 import com.example.app.ui.theme.AppTheme
+import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
 
@@ -62,9 +66,19 @@ class MainActivity : ComponentActivity() {
     private val requestAudioPermission =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { isGranted ->
             if (isGranted) {
-                speechManager.startListening()
+                prepareAndRequestTikTokCapture()
             } else {
-                Toast.makeText(this, "Cần cấp quyền Microphone để nhận diện giọng nói", Toast.LENGTH_LONG).show()
+                speechManager.reportStatus("Cần cấp quyền âm thanh Android để capture audio playback; app không nghe micro")
+            }
+        }
+
+    private val requestPlaybackCapture =
+        registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+            val data = result.data
+            if (result.resultCode == RESULT_OK && data != null) {
+                speechManager.startListening(result.resultCode, data)
+            } else {
+                speechManager.reportStatus("Bạn chưa cấp quyền capture audio TikTok Live")
             }
         }
 
@@ -87,12 +101,32 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun checkAndRequestPermission() {
+        if (speechManager.isListening.value) {
+            speechManager.stopListening()
+            return
+        }
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+            speechManager.reportStatus("Cần Android 10 trở lên để capture audio TikTok Live; app không dùng micro thay thế")
+            return
+        }
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
             == PackageManager.PERMISSION_GRANTED
         ) {
-            speechManager.startListening()
+            prepareAndRequestTikTokCapture()
         } else {
             requestAudioPermission.launch(Manifest.permission.RECORD_AUDIO)
+        }
+    }
+
+    private fun prepareAndRequestTikTokCapture() {
+        lifecycleScope.launch {
+            try {
+                speechManager.prepareModel()
+                val projectionManager = getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+                requestPlaybackCapture.launch(projectionManager.createScreenCaptureIntent())
+            } catch (error: Exception) {
+                speechManager.reportStatus("Không thể chuẩn bị nhận dạng offline: ${error.message ?: "lỗi"}")
+            }
         }
     }
 
@@ -123,8 +157,8 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
+        if (isFinishing) speechManager.stopListening()
         super.onDestroy()
-        speechManager.stopListening()
     }
 }
 
@@ -140,6 +174,8 @@ fun MainScreen(
     val speechState by speechManager.speechState.collectAsState()
     val recognizedText by speechManager.lastRecognizedText.collectAsState()
     val detectedNumber by speechManager.lastDetectedNumber.collectAsState()
+    val isListening by speechManager.isListening.collectAsState()
+    val isPreparing by speechManager.isPreparing.collectAsState()
     val commentLog by TikTokAutoCommentService.lastCommentLog.collectAsState()
 
     var isAccessibilityConnected by remember { mutableStateOf(TikTokAutoCommentService.isConnected(context)) }
@@ -200,7 +236,7 @@ fun MainScreen(
 
                     HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
 
-                    Text("Giọng Nói: $speechState", fontSize = 14.sp)
+                    Text("Audio TikTok Live: $speechState", fontSize = 14.sp)
                     if (recognizedText.isNotEmpty()) {
                         Text("Lời Nói Nhận Diện: \"$recognizedText\"", fontWeight = FontWeight.Medium)
                     }
@@ -227,6 +263,7 @@ fun MainScreen(
                             onCheckedChange = {
                                 autoCommentEnabled = it
                                 speechManager.autoCommentEnabled = it
+                                speechManager.updateSettings()
                             }
                         )
                     }
@@ -242,6 +279,7 @@ fun MainScreen(
                             onCheckedChange = {
                                 prefixAt = it
                                 speechManager.prefixAt = it
+                                speechManager.updateSettings()
                             }
                         )
                     }
@@ -250,10 +288,23 @@ fun MainScreen(
 
                     Button(
                         onClick = onRequestPermission,
-                        modifier = Modifier.fillMaxWidth()
+                        modifier = Modifier.fillMaxWidth(),
+                        enabled = !isPreparing
                     ) {
-                        Text("Bật Micro & Lắng Nghe Giọng Nói")
+                        Text(
+                            when {
+                                isPreparing -> "Đang chuẩn bị audio TikTok..."
+                                isListening -> "Dừng nghe audio TikTok Live"
+                                else -> "Bắt đầu nghe audio TikTok Live"
+                            }
+                        )
                     }
+
+                    Text(
+                        "Android có thể hiện quyền Microphone vì đây là quyền hệ thống bắt buộc cho playback capture. App không mở nguồn micro: chỉ AudioRecord nhận audio playback lọc theo UID TikTok. Nếu TikTok hoặc thiết bị chặn capture, app báo không có tiếng và không đổi nguồn.",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
 
                     Spacer(modifier = Modifier.height(8.dp))
 
