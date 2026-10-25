@@ -30,14 +30,14 @@ object VietnameseNumberParser {
 
     private const val TEEN = "mười"
     private const val HUND = "trăm"
-    private const val HALF = "rưỡi"
+    private val HALF = setOf("rưỡi", "rưởi")
 
     private val TENS = setOf("mươi", "chục")
     private val ZCONN = setOf("linh", "lẻ")
     private val THOUSAND = setOf("nghìn", "ngàn")
     private val DEFAULT_K = setOf("k", "ca", "ka")
 
-    private val NUMWORDS = DIGIT_ANY.keys + setOf(TEEN, HUND, HALF) + TENS + ZCONN + THOUSAND
+    private val NUMWORDS = DIGIT_ANY.keys + setOf(TEEN, HUND) + HALF + TENS + ZCONN + THOUSAND
 
     private val ARABIC_PATTERN = Pattern.compile("^([0-9]{1,12})(k?)$")
     private val GROUPED_ARABIC_PATTERN = Pattern.compile("(?<!\\d)(\\d{1,3}(?:[.,]\\d{3})+)(k?)(?!\\d)")
@@ -83,13 +83,15 @@ object VietnameseNumberParser {
     }
 
     private fun getDigit(tokens: List<String>, index: Int): Int? {
-        return if (index in tokens.indices) DIGIT_ANY[tokens[index]] else null
+        if (index !in tokens.indices) return null
+        val token = tokens[index]
+        return DIGIT_ANY[token] ?: token.takeIf { it.length == 1 && it[0] in '0'..'9' }?.toInt()
     }
 
     private fun afterHundred(tokens: List<String>, index: Int, shorthand: Boolean): Pair<Long, Int> {
         if (index >= tokens.size) return Pair(0L, index)
         val word = tokens[index]
-        if (word == HALF) return Pair(50L, index + 1)
+        if (word in HALF) return Pair(50L, index + 1)
         if (word == "mốt") return Pair(if (shorthand) 10L else 1L, index + 1)
         if (word in ZCONN) {
             val digit = getDigit(tokens, index + 1)
@@ -104,13 +106,13 @@ object VietnameseNumberParser {
             val digit = getDigit(tokens, index + 2)
             return if (digit != null) Pair(leadVal + digit, index + 3) else Pair(leadVal, index + 2)
         }
-        if (word in LEAD || word == "không") {
+        if (word in LEAD || word in ONES_ONLY || word == "không") {
             val first = DIGIT_ANY[word] ?: 0
             val second = getDigit(tokens, index + 1)
             if (second != null) {
                 return Pair((first * 10 + second).toLong(), index + 2)
             }
-            if (word in LEAD) {
+            if (word in LEAD || word in ONES_ONLY) {
                 return Pair((if (shorthand) first * 10 else first).toLong(), index + 1)
             }
         }
@@ -134,6 +136,13 @@ object VietnameseNumberParser {
             val leadVal = (LEAD[token] ?: 0).toLong() * 100
             val (valAfter, end) = afterHundred(tokens, index + 2, shorthand)
             return ParsedCore(leadVal + valAfter, end, "positional", "", false)
+        }
+
+        if (token in LEAD && index + 2 < n && tokens[index + 1] in ZCONN) {
+            val ones = getDigit(tokens, index + 2)
+            if (ones != null) {
+                return ParsedCore((LEAD[token]!! * 100L) + ones, index + 3, "positional", "", false)
+            }
         }
 
         if (token == HUND && (index == 0 || (!isNum(tokens[index - 1]) && tokens[index - 1] != "phần"))) {
@@ -163,11 +172,11 @@ object VietnameseNumberParser {
         if (token in LEAD) {
             val digits = mutableListOf(LEAD[token]!!)
             var end = index + 1
-            while (end < n && tokens[end] in DIGIT_ANY && digits.size < 4) {
+            while (end < n && getDigit(tokens, end) != null && digits.size < 4) {
                 if (end + 1 < n && (tokens[end + 1] == HUND || tokens[end + 1] in TENS)) {
                     break
                 }
-                digits.add(DIGIT_ANY[tokens[end]]!!)
+                digits.add(getDigit(tokens, end)!!)
                 end++
             }
             val valueText = digits.joinToString("")

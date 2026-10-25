@@ -19,6 +19,7 @@ import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
 import com.example.app.MainActivity
+import com.example.app.speech.SpeechRecognitionManager
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -29,6 +30,9 @@ class FloatingWidgetService : Service() {
     private lateinit var windowManager: WindowManager
     private var rootContainer: FrameLayout? = null
     private var popupControlView: LinearLayout? = null
+    private var connectionButton: Button? = null
+    private var connectionStatusText: TextView? = null
+    private lateinit var speechManager: SpeechRecognitionManager
     private lateinit var layoutParams: WindowManager.LayoutParams
     private var isPopupExpanded = false
 
@@ -42,6 +46,7 @@ class FloatingWidgetService : Service() {
         }
 
         windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
+        speechManager = SpeechRecognitionManager(this)
         setupFloatingView()
         _isWidgetRunning.value = true
         instance = this
@@ -110,27 +115,34 @@ class FloatingWidgetService : Service() {
             addView(titleText)
 
             val statusText = TextView(this@FloatingWidgetService).apply {
-                text = "Trạng thái: Đang lắng nghe"
+                text = "Trạng thái: Đã ngắt kết nối"
                 setTextColor(Color.LTGRAY)
                 textSize = 12f
                 setPadding(0, (4 * density).toInt(), 0, (8 * density).toInt())
             }
+            connectionStatusText = statusText
             addView(statusText)
 
-            // Button 1: Pause / Resume
-            val btnPause = Button(this@FloatingWidgetService).apply {
-                text = "Tạm Dừng / Tiếp Tục"
+            // Button 1: Stop capture or reopen the app to request a fresh capture session.
+            val btnConnection = Button(this@FloatingWidgetService).apply {
+                text = "Bật kết nối audio TikTok"
                 textSize = 11f
                 setOnClickListener {
-                    _isPaused.value = !_isPaused.value
-                    statusText.text = if (_isPaused.value) "Trạng thái: Đã Tạm Dừng" else "Trạng thái: Đang Lắng Nghe"
+                    if (speechManager.isListening.value) {
+                        speechManager.stopListening()
+                        renderConnectionState()
+                    } else {
+                        togglePopup(container)
+                        openMainActivity(startCapture = true)
+                    }
                 }
             }
-            addView(btnPause)
+            connectionButton = btnConnection
+            addView(btnConnection)
 
             // Button 2: Open Full App
             val btnOpenApp = Button(this@FloatingWidgetService).apply {
-                text = "Mở App Cài Đặt"
+                text = "Mở ứng dụng"
                 textSize = 11f
                 setOnClickListener {
                     togglePopup(container)
@@ -202,12 +214,28 @@ class FloatingWidgetService : Service() {
     private fun togglePopup(container: FrameLayout) {
         isPopupExpanded = !isPopupExpanded
         popupControlView?.visibility = if (isPopupExpanded) View.VISIBLE else View.GONE
+        if (isPopupExpanded) renderConnectionState()
         windowManager.updateViewLayout(container, layoutParams)
     }
 
-    private fun openMainActivity() {
+    private fun renderConnectionState() {
+        val listening = speechManager.isListening.value
+        connectionStatusText?.text = if (listening) {
+            "Trạng thái: Đang nghe TikTok Live"
+        } else {
+            "Trạng thái: Đã ngắt kết nối"
+        }
+        connectionButton?.text = if (listening) {
+            "Ngắt kết nối audio TikTok"
+        } else {
+            "Bật kết nối audio TikTok"
+        }
+    }
+
+    private fun openMainActivity(startCapture: Boolean = false) {
         val intent = Intent(this, MainActivity::class.java).apply {
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+            putExtra(MainActivity.EXTRA_START_CAPTURE, startCapture)
         }
         startActivity(intent)
     }
@@ -227,9 +255,6 @@ class FloatingWidgetService : Service() {
         private var instance: FloatingWidgetService? = null
         private val _isWidgetRunning = MutableStateFlow(false)
         val isWidgetRunning: StateFlow<Boolean> = _isWidgetRunning.asStateFlow()
-
-        private val _isPaused = MutableStateFlow(false)
-        val isPaused: StateFlow<Boolean> = _isPaused.asStateFlow()
 
         fun isRunning(): Boolean = instance != null
 

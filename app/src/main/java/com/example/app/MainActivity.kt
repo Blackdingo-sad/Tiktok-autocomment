@@ -4,6 +4,8 @@ import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
+import android.media.projection.MediaProjectionManager
+import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
 import android.widget.Toast
@@ -11,6 +13,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.lifecycle.lifecycleScope
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -54,17 +57,29 @@ import com.example.app.service.FloatingWidgetService
 import com.example.app.service.TikTokAutoCommentService
 import com.example.app.speech.SpeechRecognitionManager
 import com.example.app.ui.theme.AppTheme
+import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
 
     private lateinit var speechManager: SpeechRecognitionManager
+    private var startCaptureOnResume = false
 
     private val requestAudioPermission =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { isGranted ->
             if (isGranted) {
-                speechManager.startListening()
+                prepareAndRequestTikTokCapture()
             } else {
-                Toast.makeText(this, "Cần cấp quyền Microphone để nhận diện giọng nói", Toast.LENGTH_LONG).show()
+                speechManager.reportStatus("Cần cấp quyền âm thanh Android để capture audio playback; app không nghe micro")
+            }
+        }
+
+    private val requestPlaybackCapture =
+        registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+            val data = result.data
+            if (result.resultCode == RESULT_OK && data != null) {
+                speechManager.startListening(result.resultCode, data)
+            } else {
+                speechManager.reportStatus("Bạn chưa cấp quyền capture audio TikTok Live")
             }
         }
 
@@ -72,6 +87,7 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
 
+        startCaptureOnResume = intent.getBooleanExtra(EXTRA_START_CAPTURE, false)
         speechManager = SpeechRecognitionManager(this)
 
         setContent {
@@ -80,19 +96,66 @@ class MainActivity : ComponentActivity() {
                     speechManager = speechManager,
                     onRequestPermission = { checkAndRequestPermission() },
                     onOpenAccessibilitySettings = { openAccessibilitySettings() },
-                    onMinimizeToFloatingWidget = { enableOverlayAndMinimize() }
+                    onMinimizeToFloatingWidget = { enableOverlayAndMinimize() },
+                    onShutdownApp = { shutdownApp() }
                 )
             }
         }
     }
 
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        if (intent.getBooleanExtra(EXTRA_START_CAPTURE, false)) {
+            startCaptureOnResume = true
+            if (lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) {
+                window.decorView.post { startCaptureIfRequested() }
+            }
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        startCaptureIfRequested()
+    }
+
+    private fun startCaptureIfRequested() {
+        if (!startCaptureOnResume || isFinishing) return
+        startCaptureOnResume = false
+        if (!speechManager.isListening.value) requestCapturePermission()
+    }
+
     private fun checkAndRequestPermission() {
+        if (speechManager.isListening.value) {
+            speechManager.stopListening()
+            return
+        }
+        requestCapturePermission()
+    }
+
+    private fun requestCapturePermission() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+            speechManager.reportStatus("Cần Android 10 trở lên để capture audio TikTok Live; app không dùng micro thay thế")
+            return
+        }
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
             == PackageManager.PERMISSION_GRANTED
         ) {
-            speechManager.startListening()
+            prepareAndRequestTikTokCapture()
         } else {
             requestAudioPermission.launch(Manifest.permission.RECORD_AUDIO)
+        }
+    }
+
+    private fun prepareAndRequestTikTokCapture() {
+        lifecycleScope.launch {
+            try {
+                speechManager.prepareModel()
+                val projectionManager = getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+                requestPlaybackCapture.launch(projectionManager.createScreenCaptureIntent())
+            } catch (error: Exception) {
+                speechManager.reportStatus("Không thể chuẩn bị nhận dạng offline: ${error.message ?: "lỗi"}")
+            }
         }
     }
 
@@ -115,6 +178,16 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun shutdownApp() {
+        speechManager.stopListening()
+        FloatingWidgetService.stopWidget(this)
+        finishAndRemoveTask()
+    }
+
+    companion object {
+        const val EXTRA_START_CAPTURE = "com.example.app.extra.START_TIKTOK_CAPTURE"
+    }
+
     override fun onUserLeaveHint() {
         super.onUserLeaveHint()
         if (Settings.canDrawOverlays(this)) {
@@ -123,8 +196,8 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
+        if (isFinishing) speechManager.stopListening()
         super.onDestroy()
-        speechManager.stopListening()
     }
 }
 
@@ -134,12 +207,15 @@ fun MainScreen(
     speechManager: SpeechRecognitionManager,
     onRequestPermission: () -> Unit,
     onOpenAccessibilitySettings: () -> Unit,
-    onMinimizeToFloatingWidget: () -> Unit
+    onMinimizeToFloatingWidget: () -> Unit,
+    onShutdownApp: () -> Unit
 ) {
     val context = LocalContext.current
     val speechState by speechManager.speechState.collectAsState()
     val recognizedText by speechManager.lastRecognizedText.collectAsState()
     val detectedNumber by speechManager.lastDetectedNumber.collectAsState()
+    val isListening by speechManager.isListening.collectAsState()
+    val isPreparing by speechManager.isPreparing.collectAsState()
     val commentLog by TikTokAutoCommentService.lastCommentLog.collectAsState()
 
     var isAccessibilityConnected by remember { mutableStateOf(TikTokAutoCommentService.isConnected(context)) }
@@ -158,6 +234,7 @@ fun MainScreen(
     }
 
     var autoCommentEnabled by remember { mutableStateOf(true) }
+    var autoSendEnabled by remember { mutableStateOf(false) }
     var prefixAt by remember { mutableStateOf(true) }
 
     Scaffold(
@@ -200,7 +277,7 @@ fun MainScreen(
 
                     HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
 
-                    Text("Giọng Nói: $speechState", fontSize = 14.sp)
+                    Text("Audio TikTok Live: $speechState", fontSize = 14.sp)
                     if (recognizedText.isNotEmpty()) {
                         Text("Lời Nói Nhận Diện: \"$recognizedText\"", fontWeight = FontWeight.Medium)
                     }
@@ -221,12 +298,29 @@ fun MainScreen(
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Text("Tự động Comment khi đọc số")
+                        Text("Tự điền số vào ô comment")
                         Switch(
                             checked = autoCommentEnabled,
                             onCheckedChange = {
                                 autoCommentEnabled = it
                                 speechManager.autoCommentEnabled = it
+                                speechManager.updateSettings()
+                            }
+                        )
+                    }
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text("Tự gửi ngay sau khi điền")
+                        Switch(
+                            checked = autoSendEnabled,
+                            onCheckedChange = {
+                                autoSendEnabled = it
+                                speechManager.autoSendEnabled = it
+                                speechManager.updateSettings()
                             }
                         )
                     }
@@ -242,6 +336,7 @@ fun MainScreen(
                             onCheckedChange = {
                                 prefixAt = it
                                 speechManager.prefixAt = it
+                                speechManager.updateSettings()
                             }
                         )
                     }
@@ -250,10 +345,23 @@ fun MainScreen(
 
                     Button(
                         onClick = onRequestPermission,
-                        modifier = Modifier.fillMaxWidth()
+                        modifier = Modifier.fillMaxWidth(),
+                        enabled = !isPreparing
                     ) {
-                        Text("Bật Micro & Lắng Nghe Giọng Nói")
+                        Text(
+                            when {
+                                isPreparing -> "Đang chuẩn bị audio TikTok..."
+                                isListening -> "Dừng nghe audio TikTok Live"
+                                else -> "Bắt đầu nghe audio TikTok Live"
+                            }
+                        )
                     }
+
+                    Text(
+                        "Android có thể hiện quyền Microphone vì đây là quyền hệ thống bắt buộc cho playback capture. App không mở nguồn micro: chỉ AudioRecord nhận audio playback lọc theo UID TikTok. Nếu TikTok hoặc thiết bị chặn capture, app báo không có tiếng và không đổi nguồn.",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
 
                     Spacer(modifier = Modifier.height(8.dp))
 
@@ -264,6 +372,21 @@ fun MainScreen(
                     ) {
                         Text("Thu Nhỏ Thành Nút Tròn (Floating Bubble)")
                     }
+
+                    Spacer(modifier = Modifier.height(8.dp))
+
+                    Button(
+                        onClick = onShutdownApp,
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFD32F2F))
+                    ) {
+                        Text("Tắt hoàn toàn ứng dụng")
+                    }
+                    Text(
+                        "Ngắt audio, tắt nút nổi và thoát app. Quyền Trợ năng được giữ nguyên.",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                 }
             }
 
