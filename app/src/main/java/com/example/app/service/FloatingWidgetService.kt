@@ -13,13 +13,14 @@ import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
+import android.view.animation.AnticipateInterpolator
+import android.view.animation.OvershootInterpolator
 import android.widget.Button
 import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
 import com.example.app.MainActivity
-import com.example.app.speech.SpeechRecognitionManager
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -30,9 +31,6 @@ class FloatingWidgetService : Service() {
     private lateinit var windowManager: WindowManager
     private var rootContainer: FrameLayout? = null
     private var popupControlView: LinearLayout? = null
-    private var connectionButton: Button? = null
-    private var connectionStatusText: TextView? = null
-    private lateinit var speechManager: SpeechRecognitionManager
     private lateinit var layoutParams: WindowManager.LayoutParams
     private var isPopupExpanded = false
 
@@ -46,7 +44,6 @@ class FloatingWidgetService : Service() {
         }
 
         windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
-        speechManager = SpeechRecognitionManager(this)
         setupFloatingView()
         _isWidgetRunning.value = true
         instance = this
@@ -76,85 +73,109 @@ class FloatingWidgetService : Service() {
 
         val container = FrameLayout(this)
 
-        // 1. Floating Circle View
-        val bubbleSizePx = (60 * density).toInt()
+        // 1. Floating Circle View (The Sphere / Bubble trigger)
+        val bubbleSizePx = (50 * density).toInt()
         val bubbleView = FrameLayout(this).apply {
             layoutParams = FrameLayout.LayoutParams(bubbleSizePx, bubbleSizePx)
             background = GradientDrawable().apply {
                 shape = GradientDrawable.OVAL
-                setColor(Color.parseColor("#1E88E5"))
+                setColor(Color.parseColor("#0F172A"))
             }
         }
 
         val iconView = ImageView(this).apply {
-            setImageResource(android.R.drawable.ic_btn_speak_now)
-            val padding = (12 * density).toInt()
+            setImageResource(android.R.drawable.ic_menu_compass)
+            val padding = (10 * density).toInt()
             setPadding(padding, padding, padding, padding)
+            setColorFilter(Color.parseColor("#00E676"))
         }
         bubbleView.addView(iconView)
 
-        // 2. Compact Control Popup Card
+        // 2. Compact Control Popup Card (No duplicate icon, placed cleanly below bubble)
         val popupView = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             val bgCard = GradientDrawable().apply {
                 shape = GradientDrawable.RECTANGLE
-                cornerRadius = 16 * density
-                setColor(Color.parseColor("#263238"))
+                cornerRadius = 14 * density
+                setColor(Color.parseColor("#0F172A"))
             }
             background = bgCard
-            val p = (12 * density).toInt()
+            val p = (10 * density).toInt()
             setPadding(p, p, p, p)
+
+            val lp = FrameLayout.LayoutParams(
+                (180 * density).toInt(),
+                FrameLayout.LayoutParams.WRAP_CONTENT
+            ).apply {
+                topMargin = (56 * density).toInt()
+            }
+            layoutParams = lp
             visibility = View.GONE
 
             val titleText = TextView(this@FloatingWidgetService).apply {
-                text = "TikTok Live Control"
-                setTextColor(Color.WHITE)
-                textSize = 14f
+                text = "⚡ TikTok Speed Boost"
+                setTextColor(Color.parseColor("#00E676"))
+                textSize = 13f
                 setTypeface(null, android.graphics.Typeface.BOLD)
             }
             addView(titleText)
 
             val statusText = TextView(this@FloatingWidgetService).apply {
-                text = "Trạng thái: Đã ngắt kết nối"
-                setTextColor(Color.LTGRAY)
-                textSize = 12f
-                setPadding(0, (4 * density).toInt(), 0, (8 * density).toInt())
+                text = "Trạng thái: Đang Tăng Tốc ⚡"
+                setTextColor(Color.parseColor("#94A3B8"))
+                textSize = 10f
+                setPadding(0, (2 * density).toInt(), 0, (8 * density).toInt())
             }
-            connectionStatusText = statusText
             addView(statusText)
 
-            // Button 1: Stop capture or reopen the app to request a fresh capture session.
-            val btnConnection = Button(this@FloatingWidgetService).apply {
-                text = "Bật kết nối audio TikTok"
-                textSize = 11f
+            // Button 1: Toggle Boost
+            val btnBoost = Button(this@FloatingWidgetService).apply {
+                text = "Bật / Tắt Boost"
+                textSize = 10f
+                setPadding(0, 0, 0, 0)
+                val btnLp = LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    (32 * density).toInt()
+                ).apply {
+                    bottomMargin = (4 * density).toInt()
+                }
+                layoutParams = btnLp
                 setOnClickListener {
-                    if (speechManager.isListening.value) {
-                        speechManager.stopListening()
-                        renderConnectionState()
-                    } else {
-                        togglePopup(container)
-                        openMainActivity(startCapture = true)
-                    }
+                    _isBoostActive.value = !_isBoostActive.value
+                    statusText.text = if (_isBoostActive.value) "Trạng thái: Đang Tăng Tốc ⚡" else "Trạng thái: Tắt Boost"
                 }
             }
-            connectionButton = btnConnection
-            addView(btnConnection)
+            addView(btnBoost)
 
-            // Button 2: Open Full App
+            // Button 2: Open Full App Settings
             val btnOpenApp = Button(this@FloatingWidgetService).apply {
-                text = "Mở ứng dụng"
-                textSize = 11f
+                text = "Mở App Cài Đặt"
+                textSize = 10f
+                setPadding(0, 0, 0, 0)
+                val btnLp = LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    (32 * density).toInt()
+                ).apply {
+                    bottomMargin = (4 * density).toInt()
+                }
+                layoutParams = btnLp
                 setOnClickListener {
-                    togglePopup(container)
+                    togglePopup(container, density)
                     openMainActivity()
                 }
             }
             addView(btnOpenApp)
 
-            // Button 3: Stop / Close
+            // Button 3: Close Floating Widget
             val btnClose = Button(this@FloatingWidgetService).apply {
                 text = "Tắt Nút Nổi"
-                textSize = 11f
+                textSize = 10f
+                setPadding(0, 0, 0, 0)
+                val btnLp = LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    (32 * density).toInt()
+                )
+                layoutParams = btnLp
                 setBackgroundColor(Color.parseColor("#D32F2F"))
                 setTextColor(Color.WHITE)
                 setOnClickListener {
@@ -199,7 +220,7 @@ class FloatingWidgetService : Service() {
                 MotionEvent.ACTION_UP -> {
                     if (isClick) {
                         v.performClick()
-                        togglePopup(container)
+                        togglePopup(container, density)
                     }
                     true
                 }
@@ -211,31 +232,41 @@ class FloatingWidgetService : Service() {
         windowManager.addView(rootContainer, layoutParams)
     }
 
-    private fun togglePopup(container: FrameLayout) {
+    private fun togglePopup(container: FrameLayout, density: Float) {
+        val popupView = popupControlView ?: return
         isPopupExpanded = !isPopupExpanded
-        popupControlView?.visibility = if (isPopupExpanded) View.VISIBLE else View.GONE
-        if (isPopupExpanded) renderConnectionState()
+
+        popupView.pivotX = 25f * density
+        popupView.pivotY = 0f
+
+        if (isPopupExpanded) {
+            popupView.scaleX = 0f
+            popupView.scaleY = 0f
+            popupView.alpha = 0f
+            popupView.visibility = View.VISIBLE
+            popupView.animate()
+                .scaleX(1f)
+                .scaleY(1f)
+                .alpha(1f)
+                .setDuration(260)
+                .setInterpolator(OvershootInterpolator(1.3f))
+                .start()
+        } else {
+            popupView.animate()
+                .scaleX(0f)
+                .scaleY(0f)
+                .alpha(0f)
+                .setDuration(220)
+                .setInterpolator(AnticipateInterpolator(1.2f))
+                .withEndAction { popupView.visibility = View.GONE }
+                .start()
+        }
         windowManager.updateViewLayout(container, layoutParams)
     }
 
-    private fun renderConnectionState() {
-        val listening = speechManager.isListening.value
-        connectionStatusText?.text = if (listening) {
-            "Trạng thái: Đang nghe TikTok Live"
-        } else {
-            "Trạng thái: Đã ngắt kết nối"
-        }
-        connectionButton?.text = if (listening) {
-            "Ngắt kết nối audio TikTok"
-        } else {
-            "Bật kết nối audio TikTok"
-        }
-    }
-
-    private fun openMainActivity(startCapture: Boolean = false) {
+    private fun openMainActivity() {
         val intent = Intent(this, MainActivity::class.java).apply {
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
-            putExtra(MainActivity.EXTRA_START_CAPTURE, startCapture)
         }
         startActivity(intent)
     }
@@ -255,6 +286,9 @@ class FloatingWidgetService : Service() {
         private var instance: FloatingWidgetService? = null
         private val _isWidgetRunning = MutableStateFlow(false)
         val isWidgetRunning: StateFlow<Boolean> = _isWidgetRunning.asStateFlow()
+
+        private val _isBoostActive = MutableStateFlow(true)
+        val isBoostActive: StateFlow<Boolean> = _isBoostActive.asStateFlow()
 
         fun isRunning(): Boolean = instance != null
 

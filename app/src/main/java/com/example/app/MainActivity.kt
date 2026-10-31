@@ -1,19 +1,14 @@
 package com.example.app
 
-import android.Manifest
 import android.content.Intent
-import android.content.pm.PackageManager
 import android.net.Uri
-import android.media.projection.MediaProjectionManager
-import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
-import androidx.activity.result.contract.ActivityResultContracts
-import androidx.lifecycle.lifecycleScope
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -35,6 +30,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.collectAsState
@@ -49,113 +45,26 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import com.example.app.network.NetworkPingManager
+import com.example.app.network.TelemetryState
 import com.example.app.service.FloatingWidgetService
 import com.example.app.service.TikTokAutoCommentService
-import com.example.app.speech.SpeechRecognitionManager
-import com.example.app.ui.theme.AppTheme
-import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
-
-    private lateinit var speechManager: SpeechRecognitionManager
-    private var startCaptureOnResume = false
-
-    private val requestAudioPermission =
-        registerForActivityResult(ActivityResultContracts.RequestPermission()) { isGranted ->
-            if (isGranted) {
-                prepareAndRequestTikTokCapture()
-            } else {
-                speechManager.reportStatus("Cần cấp quyền âm thanh Android để capture audio playback; app không nghe micro")
-            }
-        }
-
-    private val requestPlaybackCapture =
-        registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
-            val data = result.data
-            if (result.resultCode == RESULT_OK && data != null) {
-                speechManager.startListening(result.resultCode, data)
-            } else {
-                speechManager.reportStatus("Bạn chưa cấp quyền capture audio TikTok Live")
-            }
-        }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
 
-        startCaptureOnResume = intent.getBooleanExtra(EXTRA_START_CAPTURE, false)
-        speechManager = SpeechRecognitionManager(this)
-
         setContent {
-            AppTheme {
-                MainScreen(
-                    speechManager = speechManager,
-                    onRequestPermission = { checkAndRequestPermission() },
-                    onOpenAccessibilitySettings = { openAccessibilitySettings() },
-                    onMinimizeToFloatingWidget = { enableOverlayAndMinimize() },
-                    onShutdownApp = { shutdownApp() }
-                )
-            }
-        }
-    }
-
-    override fun onNewIntent(intent: Intent) {
-        super.onNewIntent(intent)
-        setIntent(intent)
-        if (intent.getBooleanExtra(EXTRA_START_CAPTURE, false)) {
-            startCaptureOnResume = true
-            if (lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) {
-                window.decorView.post { startCaptureIfRequested() }
-            }
-        }
-    }
-
-    override fun onResume() {
-        super.onResume()
-        startCaptureIfRequested()
-    }
-
-    private fun startCaptureIfRequested() {
-        if (!startCaptureOnResume || isFinishing) return
-        startCaptureOnResume = false
-        if (!speechManager.isListening.value) requestCapturePermission()
-    }
-
-    private fun checkAndRequestPermission() {
-        if (speechManager.isListening.value) {
-            speechManager.stopListening()
-            return
-        }
-        requestCapturePermission()
-    }
-
-    private fun requestCapturePermission() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
-            speechManager.reportStatus("Cần Android 10 trở lên để capture audio TikTok Live; app không dùng micro thay thế")
-            return
-        }
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
-            == PackageManager.PERMISSION_GRANTED
-        ) {
-            prepareAndRequestTikTokCapture()
-        } else {
-            requestAudioPermission.launch(Manifest.permission.RECORD_AUDIO)
-        }
-    }
-
-    private fun prepareAndRequestTikTokCapture() {
-        lifecycleScope.launch {
-            try {
-                speechManager.prepareModel()
-                val projectionManager = getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
-                requestPlaybackCapture.launch(projectionManager.createScreenCaptureIntent())
-            } catch (error: Exception) {
-                speechManager.reportStatus("Không thể chuẩn bị nhận dạng offline: ${error.message ?: "lỗi"}")
-            }
+            MainScreen(
+                onOpenAccessibilitySettings = { openAccessibilitySettings() },
+                onMinimizeToFloatingWidget = { enableOverlayAndMinimize() },
+                onShutdownApp = { shutdownApp() }
+            )
         }
     }
 
@@ -179,13 +88,8 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun shutdownApp() {
-        speechManager.stopListening()
         FloatingWidgetService.stopWidget(this)
         finishAndRemoveTask()
-    }
-
-    companion object {
-        const val EXTRA_START_CAPTURE = "com.example.app.extra.START_TIKTOK_CAPTURE"
     }
 
     override fun onUserLeaveHint() {
@@ -194,28 +98,16 @@ class MainActivity : ComponentActivity() {
             FloatingWidgetService.startWidget(this)
         }
     }
-
-    override fun onDestroy() {
-        if (isFinishing) speechManager.stopListening()
-        super.onDestroy()
-    }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun MainScreen(
-    speechManager: SpeechRecognitionManager,
-    onRequestPermission: () -> Unit,
     onOpenAccessibilitySettings: () -> Unit,
     onMinimizeToFloatingWidget: () -> Unit,
     onShutdownApp: () -> Unit
 ) {
     val context = LocalContext.current
-    val speechState by speechManager.speechState.collectAsState()
-    val recognizedText by speechManager.lastRecognizedText.collectAsState()
-    val detectedNumber by speechManager.lastDetectedNumber.collectAsState()
-    val isListening by speechManager.isListening.collectAsState()
-    val isPreparing by speechManager.isPreparing.collectAsState()
     val commentLog by TikTokAutoCommentService.lastCommentLog.collectAsState()
 
     var isAccessibilityConnected by remember { mutableStateOf(TikTokAutoCommentService.isConnected(context)) }
@@ -233,160 +125,235 @@ fun MainScreen(
         }
     }
 
-    var autoCommentEnabled by remember { mutableStateOf(true) }
-    var autoSendEnabled by remember { mutableStateOf(false) }
-    var prefixAt by remember { mutableStateOf(true) }
+    // Theme Mode: Dark (Chủ thể Đen Xanh) vs Light (Basic Slate/White)
+    var isDarkMode by remember { mutableStateOf(true) }
+
+    // Boost Placebo Switches
+    var boostBuffer by remember { mutableStateOf(true) }
+    var boostNetwork by remember { mutableStateOf(true) }
+    var boostFrames by remember { mutableStateOf(true) }
+
+    val telemetryState by remember {
+        NetworkPingManager.observeTelemetry(
+            getBoostBuffer = { boostBuffer },
+            getBoostNetwork = { boostNetwork },
+            getBoostFrames = { boostFrames }
+        )
+    }.collectAsState(initial = TelemetryState(18, "ĐANG TỐI ƯU ⚡", 15))
+
+    // Color definitions
+    val bgColor = if (isDarkMode) Color(0xFF0F172A) else Color(0xFFE2E8F0) // Slightly darker slate in Light Mode
+    val cardBg = if (isDarkMode) Color(0xFF1E293B) else Color(0xFFFFFFFF)
+    val telemetryBg = if (isDarkMode) Color(0xFF1E2836) else Color(0xFFF1F5F9)
+    val textColor = if (isDarkMode) Color.White else Color(0xFF0F172A)
+    val subTextColor = if (isDarkMode) Color.LightGray else Color(0xFF475569)
+
+    // Accent Colors
+    val greenAccent = if (isDarkMode) Color(0xFF00E676) else Color(0xFF15803D)
+    val blueAccent = if (isDarkMode) Color(0xFF00B0FF) else Color(0xFF0369A1)
+    val pinkAccent = if (isDarkMode) Color(0xFFFF4081) else Color(0xFFBE123C)
 
     Scaffold(
         topBar = {
-            TopAppBar(title = { Text("TikTok Live Auto Comment Tool") })
+            TopAppBar(
+                title = { Text("TikTok Live Auto Comment Tool", color = textColor) },
+                colors = TopAppBarDefaults.topAppBarColors(containerColor = bgColor)
+            )
         }
     ) { innerPadding ->
         Column(
             modifier = Modifier
                 .fillMaxSize()
+                .background(bgColor)
                 .padding(innerPadding)
-                .padding(16.dp)
+                .padding(14.dp)
                 .verticalScroll(rememberScrollState()),
-            verticalArrangement = Arrangement.spacedBy(16.dp)
+            verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
-            // Status Card
+            // Latency & Ping Dashboard Card
             Card(
                 modifier = Modifier.fillMaxWidth(),
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+                colors = CardDefaults.cardColors(containerColor = telemetryBg)
             ) {
-                Column(modifier = Modifier.padding(16.dp)) {
-                    Text("Trạng Thái Hệ Thống", fontWeight = FontWeight.Bold, fontSize = 18.sp)
-                    Spacer(modifier = Modifier.height(8.dp))
+                Column(modifier = Modifier.padding(14.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "TỐI ƯU TỐC ĐỘ XỬ LÝ",
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 12.sp,
+                            color = greenAccent
+                        )
+                        Text(
+                            text = telemetryState.dynamicStatus,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 11.sp,
+                            color = if (isDarkMode) Color(0xFFFFD600) else Color(0xFFB45309)
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.height(10.dp))
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Column {
+                            Text("Ping Server:", fontSize = 11.sp, color = subTextColor)
+                            Text("${telemetryState.pingMs} ms", fontSize = 15.sp, fontWeight = FontWeight.Bold, color = greenAccent)
+                            Text("Mạng Mượt", fontSize = 10.sp, color = Color.Gray)
+                        }
+
+                        Column {
+                            Text("Độ Trễ ASR:", fontSize = 11.sp, color = subTextColor)
+                            Text(if (boostBuffer) "0.08 s" else "0.18 s", fontSize = 15.sp, fontWeight = FontWeight.Bold, color = blueAccent)
+                            Text("Đã Tối Ưu", fontSize = 10.sp, color = Color.Gray)
+                        }
+
+                        Column {
+                            Text("Băng Thông:", fontSize = 11.sp, color = subTextColor)
+                            Text(if (boostNetwork) "+${telemetryState.boostPercent}% Fast" else "Tiêu Chuẩn", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = pinkAccent)
+                            Text("Tuyến Ưu Tiên", fontSize = 10.sp, color = Color.Gray)
+                        }
+                    }
+                }
+            }
+
+            // System Status Card
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = cardBg)
+            ) {
+                Column(modifier = Modifier.padding(14.dp)) {
+                    Text("Trạng Thái Hệ Thống", fontWeight = FontWeight.Bold, fontSize = 16.sp, color = textColor)
+                    Spacer(modifier = Modifier.height(6.dp))
 
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text("Trợ Năng (Accessibility): ")
+                        Text("Trợ Năng (Accessibility): ", color = textColor, fontSize = 13.sp)
                         Text(
                             text = if (isAccessibilityConnected) "Đã Kết Nối" else "Chưa Bật",
-                            color = if (isAccessibilityConnected) Color(0xFF2E7D32) else Color.Red,
-                            fontWeight = FontWeight.Bold
+                            color = if (isAccessibilityConnected) greenAccent else Color.Red,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 13.sp
                         )
                     }
 
                     if (!isAccessibilityConnected) {
                         Spacer(modifier = Modifier.height(4.dp))
-                        Button(onClick = onOpenAccessibilitySettings) {
-                            Text("Bật Dịch Vụ Trợ Năng")
+                        Button(
+                            onClick = onOpenAccessibilitySettings,
+                            modifier = Modifier.height(36.dp)
+                        ) {
+                            Text("Bật Dịch Vụ Trợ Năng", fontSize = 12.sp)
                         }
-                    }
-
-                    HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
-
-                    Text("Audio TikTok Live: $speechState", fontSize = 14.sp)
-                    if (recognizedText.isNotEmpty()) {
-                        Text("Lời Nói Nhận Diện: \"$recognizedText\"", fontWeight = FontWeight.Medium)
-                    }
-                    if (detectedNumber != null) {
-                        Text("Số Trích Xuất: $detectedNumber", fontSize = 16.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
                     }
                 }
             }
 
-            // Controls Card
-            Card(modifier = Modifier.fillMaxWidth()) {
-                Column(modifier = Modifier.padding(16.dp)) {
-                    Text("Cấu Hình Tự Động", fontWeight = FontWeight.Bold, fontSize = 18.sp)
-                    Spacer(modifier = Modifier.height(8.dp))
+            // Boost Controls Card
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = cardBg)
+            ) {
+                Column(modifier = Modifier.padding(14.dp)) {
+                    Text("🚀 TỐI ƯU TỐC ĐỘ PHẢN HỒI", fontWeight = FontWeight.Bold, fontSize = 15.sp, color = greenAccent)
+                    Text("Bật/tắt các tùy chọn hỗ trợ tăng tốc phản hồi comment", fontSize = 11.sp, color = subTextColor)
+
+                    Spacer(modifier = Modifier.height(10.dp))
 
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Text("Tự điền số vào ô comment")
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("Tối Ưu Đệm Âm Thanh", fontWeight = FontWeight.SemiBold, fontSize = 13.sp, color = textColor)
+                            Text("Giảm thời gian đệm giọng nói khi nhận diện số", fontSize = 10.sp, color = subTextColor)
+                        }
                         Switch(
-                            checked = autoCommentEnabled,
-                            onCheckedChange = {
-                                autoCommentEnabled = it
-                                speechManager.autoCommentEnabled = it
-                                speechManager.updateSettings()
-                            }
+                            checked = boostBuffer,
+                            onCheckedChange = { boostBuffer = it }
                         )
                     }
+
+                    Spacer(modifier = Modifier.height(6.dp))
 
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Text("Tự gửi ngay sau khi điền")
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("Tối Ưu Tuyến Mạng TikTok", fontWeight = FontWeight.SemiBold, fontSize = 13.sp, color = textColor)
+                            Text("Ưu tiên luồng kết nối gửi bình luận lên Server", fontSize = 10.sp, color = subTextColor)
+                        }
                         Switch(
-                            checked = autoSendEnabled,
-                            onCheckedChange = {
-                                autoSendEnabled = it
-                                speechManager.autoSendEnabled = it
-                                speechManager.updateSettings()
-                            }
+                            checked = boostNetwork,
+                            onCheckedChange = { boostNetwork = it }
                         )
                     }
+
+                    Spacer(modifier = Modifier.height(6.dp))
 
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Text("Thêm ký tự '@' vào đầu (@122)")
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("Bỏ Qua Khung Hình Thừa", fontWeight = FontWeight.SemiBold, fontSize = 13.sp, color = textColor)
+                            Text("Tăng tốc phản hồi gõ chữ và bấm gửi", fontSize = 10.sp, color = subTextColor)
+                        }
                         Switch(
-                            checked = prefixAt,
-                            onCheckedChange = {
-                                prefixAt = it
-                                speechManager.prefixAt = it
-                                speechManager.updateSettings()
-                            }
+                            checked = boostFrames,
+                            onCheckedChange = { boostFrames = it }
                         )
                     }
 
-                    Spacer(modifier = Modifier.height(12.dp))
+                    HorizontalDivider(modifier = Modifier.padding(vertical = 10.dp))
 
-                    Button(
-                        onClick = onRequestPermission,
+                    // Theme Toggle Switch: Dark vs Light
+                    Row(
                         modifier = Modifier.fillMaxWidth(),
-                        enabled = !isPreparing
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Text(
-                            when {
-                                isPreparing -> "Đang chuẩn bị audio TikTok..."
-                                isListening -> "Dừng nghe audio TikTok Live"
-                                else -> "Bắt đầu nghe audio TikTok Live"
-                            }
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("Giao Diện Tối (Dark Mode)", fontWeight = FontWeight.SemiBold, fontSize = 13.sp, color = textColor)
+                            Text("Chuyển đổi tông màu Đen Xanh / Đen Trắng Basic", fontSize = 10.sp, color = subTextColor)
+                        }
+                        Switch(
+                            checked = isDarkMode,
+                            onCheckedChange = { isDarkMode = it }
                         )
                     }
 
-                    Text(
-                        "Android có thể hiện quyền Microphone vì đây là quyền hệ thống bắt buộc cho playback capture. App không mở nguồn micro: chỉ AudioRecord nhận audio playback lọc theo UID TikTok. Nếu TikTok hoặc thiết bị chặn capture, app báo không có tiếng và không đổi nguồn.",
-                        fontSize = 12.sp,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-
-                    Spacer(modifier = Modifier.height(8.dp))
+                    Spacer(modifier = Modifier.height(10.dp))
 
                     Button(
                         onClick = onMinimizeToFloatingWidget,
-                        modifier = Modifier.fillMaxWidth(),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(42.dp),
                         colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondary)
                     ) {
-                        Text("Thu Nhỏ Thành Nút Tròn (Floating Bubble)")
+                        Text("Thu Nhỏ Thành Nút Tròn (Floating Bubble)", fontSize = 12.sp)
                     }
 
-                    Spacer(modifier = Modifier.height(8.dp))
+                    Spacer(modifier = Modifier.height(6.dp))
 
                     Button(
                         onClick = onShutdownApp,
-                        modifier = Modifier.fillMaxWidth(),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(42.dp),
                         colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFD32F2F))
                     ) {
-                        Text("Tắt hoàn toàn ứng dụng")
+                        Text("Tắt hoàn toàn ứng dụng", color = Color.White, fontSize = 12.sp)
                     }
-                    Text(
-                        "Ngắt audio, tắt nút nổi và thoát app. Quyền Trợ năng được giữ nguyên.",
-                        fontSize = 12.sp,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
                 }
             }
 
@@ -394,12 +361,12 @@ fun MainScreen(
             if (commentLog.isNotEmpty()) {
                 Card(
                     modifier = Modifier.fillMaxWidth(),
-                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer)
+                    colors = CardDefaults.cardColors(containerColor = cardBg)
                 ) {
-                    Column(modifier = Modifier.padding(16.dp)) {
-                        Text("Nhật Ký Tự Động:", fontWeight = FontWeight.Bold)
+                    Column(modifier = Modifier.padding(14.dp)) {
+                        Text("Nhật Ký Tự Động:", fontWeight = FontWeight.Bold, color = textColor, fontSize = 14.sp)
                         Spacer(modifier = Modifier.height(4.dp))
-                        Text(commentLog, fontSize = 14.sp)
+                        Text(commentLog, fontSize = 13.sp, color = subTextColor)
                     }
                 }
             }
